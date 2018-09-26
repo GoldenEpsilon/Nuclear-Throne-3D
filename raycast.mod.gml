@@ -24,6 +24,7 @@ global.surfFloor = -1;
 global.surfFloorW = 2000;
 global.surfFloorH = 2000;
 global.surfShadows = -1;
+global.surfWallShadow = -1;
 
 // in lieu of automatically scaling surfaces
 global.display_res = [1920/5, 1080/5];
@@ -470,7 +471,7 @@ if(argument0 == "localset") {
                 if(player_find(index) == id && index == global.camera){
                     global.camera = index;
                     global.camera_x = x;
-                    global.camera_y = y - 1;
+                    global.camera_y = y;
                     global.camera_angle = gunangle;
     				if(vertical){
     					global.camera_angle_v+=yTurn;
@@ -588,52 +589,101 @@ if(argument0 == "localset") {
         draw_surface(_surf, _surfX - floor(global.camera_x - global.view_dist), _surfY - floor(global.camera_y - global.view_dist));
 
          // Shadows:
-        var _surf = global.surfShadows;
-        if(!surface_exists(_surf)){
-            global.surfShadows = surface_create(_surfW, _surfH);
-            _surf = global.surfShadows;
-        }
-
+        if(!surface_exists(global.surfShadows)) global.surfShadows = surface_create(_surfW, _surfH);
         if(instance_exists(BackCont)){
-            var w = instances_matching(Wall, "shadows_3D", null);
-            if(array_length(w) > 0){
-                surface_set_target(_surf);
+            var _surf = global.surfShadows,
+                _spd = 1/90,
+                _interval = 90,
+                _sx = 12 * cos((current_frame div _interval) * _spd),
+                _sy = 12 * sin((current_frame div _interval) * _spd);
+
+             // Draw Wall Surface:
+            var w = instances_matching([Wall, FloorExplo], "shadows_3D", null, false);
+            if(array_length(w) > 0 || !surface_exists(global.surfWallShadow) || (current_frame mod _interval) < current_time_scale){
+                if(!surface_exists(global.surfWallShadow)){
+                    global.surfWallShadow = surface_create(_surfW, _surfH);
+                }
+
+                surface_set_target(global.surfWallShadow);
                 draw_clear_alpha(0, 0);
 
-                d3d_set_fog(1, BackCont.shadcol, 0, 0);
-                with(Wall){
-                    shadows_3D = true;
+                 // Shadow Offsets:
+                var _pos = [[[], []], [[], []]],
+                    _wallSide = (round(point_direction(_sx, _sy, 0, 0) / 90) * 90) + 90,
+                    o = 14;
 
+                for(var i = 0; i < 4; i++){
+                    var _dir = -135 + (i * 90) + _wallSide;
+                    _pos[0, 0][@i] = lengthdir_x(o, _dir);
+                    _pos[1, 0][@i] = (_pos[0, 0][i] * -0.85) + _sx;
+                    _pos[0, 1][@i] = lengthdir_y(o, _dir);
+                    _pos[1, 1][@i] = (_pos[0, 1][i] * -0.85) + _sy;
+                }
+
+                 // Draw:
+                var o = 200;
+                with(w) shadows_3D = true;
+                with(instances_rectangle(global.camera_x - o, global.camera_y - o, global.camera_x + o, global.camera_y + o, Wall)){
                     var _x = x - _surfX,
                         _y = y - _surfY,
-                        _ox = 16,
-                        _oy = 16;
-        
-                    draw_primitive_begin(pr_trianglestrip);
-                    draw_vertex(_x, _y);
-                    draw_vertex(_x + 16, _y + 16);
-                    draw_vertex(_x - 1 + _ox, _y - 1 - _oy);
-                    draw_vertex(_x + 17 + _ox, _y + 17 - _oy);
-                    draw_primitive_end();
-                    draw_sprite(outspr, image_index, _x - sprite_get_xoffset(outspr) + 4 + _ox, _y + sprite_get_yoffset(outspr) - 4 - _oy);
+                        _fx = _x + _sx,
+                        _fy = _y + _sy;
+
+                    draw_sprite_pos(sprWall2Out, 0, _x, _y, _x + 16, _y + 16, _fx + 17, _fy + 17, _fx - 1, _fy - 1, 1);
+                    draw_sprite_pos(sprWall2Out, 0, _x + 16, _y, _x, _y + 16, _fx - 1, _fy + 17, _fx + 17, _fy - 1, 1);
+
+                    _x += 8;
+                    _y += 8;
+
+                    for(var i = 0; i < array_length(_pos); i++){
+                        var _dx = _pos[i, 0],
+                            _dy = _pos[i, 1];
+
+                        draw_sprite_pos(outspr, image_index, _x + _dx[0], _y + _dy[0], _x + _dx[1], _y + _dy[1], _x + _dx[2], _y + _dy[2], _x + _dx[3], _y + _dy[3], 1);
+                    }
                 }
-                /*with(Player){
-                    var _x = x - _surfX,
-                        _y = y - _surfY - 12,
-                        _ox = sprite_xoffset,
-                        _oy = sprite_yoffset,
-                        w = sprite_width,
-                        h = sprite_height;
-
-                    draw_sprite_pos(sprite_index, image_index, _x - _ox, _y - _oy, _x + (w - _ox), _y - _oy, _x + (w - _ox), _y + (h - _oy), _x - _ox, _y + (h - _oy), 1);
-                }*/
-                d3d_set_fog(0, 0, 0, 0);
-
-                surface_reset_target();
-    	        surface_set_target(global.planesurf);
             }
 
-            draw_surface_ext(_surf, _surfX - floor(global.camera_x - global.view_dist), _surfY - floor(global.camera_y - global.view_dist), 1, 1, 0, c_white, BackCont.shadalpha);
+             // Draw Shadows:
+            surface_set_target(_surf);
+            draw_clear_alpha(0, 0);
+            d3d_set_fog(1, c_white, 0, 0);
+
+                 // Walls:
+                draw_surface(global.surfWallShadow, 0, 0);
+
+                var a = global.camera_angle - 90;
+                with(instances_viewbounds(40, hitme)){
+                     // Cool Shadows:
+                    if(true){
+                        var _ox = sprite_xoffset,
+                            _oy = sprite_yoffset,
+                            w = sprite_width,
+                            h = sprite_height,
+                            _x = x - _surfX,
+                            _y = y - _surfY - _oy,
+                            _x1 = _x - lengthdir_x(_ox, a) + _sx,
+                            _y1 = _y - lengthdir_y(_ox, a) + (h - _oy) + (3 * _sy),
+                            _x2 = _x1 + lengthdir_x(w, a),
+                            _y2 = _y1 + lengthdir_y(w, a),
+                            _x3 = _x + lengthdir_x(w - _ox, a),
+                            _y3 = _y + lengthdir_y(w - _ox, a) + (h - _oy),
+                            _x4 = _x3 - lengthdir_x(w, a),
+                            _y4 = _y3 - lengthdir_y(w, a);
+        
+                        draw_sprite_pos(sprite_index, image_index, _x1, _y1, _x2, _y2, _x3, _y3, _x4, _y4, 1);
+                    }
+
+                     // Classic Shadows:
+                    else{
+                        var o = (sprite_height / 3);
+                        draw_sprite_ext(spr_shadow, image_index, x - _surfX - lengthdir_x(o, a - 90), y - _surfY - lengthdir_y(o, a - 90), 1, 1, a, c_white, 1);
+                    }
+                }
+            
+            d3d_set_fog(0, 0, 0, 0);
+    	    surface_set_target(global.planesurf);
+            draw_surface_ext(_surf, _surfX - floor(global.camera_x - global.view_dist), _surfY - floor(global.camera_y - global.view_dist), 1, 1, 0, BackCont.shadcol, BackCont.shadalpha);
         }
 
     plane_raycast(0);
