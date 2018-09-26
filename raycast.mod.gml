@@ -24,10 +24,11 @@ global.surfFloor = -1;
 global.surfFloorW = 2000;
 global.surfFloorH = 2000;
 global.surfShadows = -1;
+global.surfWallShadow = -1;
 
 // in lieu of automatically scaling surfaces
-global.display_res = [1920/5, 1080/5];
-game_set_size(global.display_res[0], global.display_res[1]);
+global.display_res = [1920, 1080];
+game_set_size(round(240*global.display_res[0]/global.display_res[1]), 240);
 
 // surfaces
 global.drawsurf = -1; // the paintbrush
@@ -143,6 +144,51 @@ global.sh_frag = "
 	}
 ";
 
+// for now
+global.sh_frag_general = "
+
+	$INCLUDES
+	
+	uniform float4 uvs : register(ps, c[7]);
+	uniform float4 uvData : register(ps, c[8]);
+	uniform float4 location : register(ps, c[9]);
+	
+	const static float3 defaultNormal = float3(0.0, 1.0, 0.0);
+	const static float3 defaultXAxis = float3(1.0, 0.0, 0.0);
+	const static float3 defaultYAxis = float3(0.0, 0.0, -1.0);
+	
+	float4 main(PixelShaderInput INPUT) : SV_TARGET {
+		float actualY = frac(2 * INPUT.vTexcoord.y);
+		// rectilinear perspective
+		float3 rayDir = normalize(rotateZ(float3(1.0, tan(cameraFOV) * 2 * (INPUT.vTexcoord.x - 0.5), tan(cameraFOV) * 2 * (0.5 - actualY) / cameraAspect), -cameraDir.x, -cameraDir.y));
+		float3 normal = rotateZ(defaultNormal, location.w, 0);
+		float3 xAxis = rotateZ(defaultXAxis, location.w, 0);
+		float3 yAxis = defaultYAxis;
+		float rayDist = dot(location - cameraLoc, normal) / dot(rayDir, normal);
+		if (rayDist > 0 && rayDist < pixelToDepth(tex2D(renderTex, float2(INPUT.vTexcoord.x, (0.5 + actualY/2))))) {
+			float3 intersect = cameraLoc + rayDist * rayDir;
+			float2 planeCoords = float2(dot(xAxis, intersect - location), dot(yAxis, intersect - location));
+			
+			float2 spriteCoords = (planeCoords + uvData.xy) / uvData.zw; // 0-1 coordinates in trimmed sprite
+			// for comprehension's sake, this was the original line:
+			// float2 spriteCoords = (planeCoords/scale + sprOffset - uvData.xy) / (sprSize * uvData.zw);
+			// recognizing the variables can be combined improves performance
+			
+			if(spriteCoords.x >= 0 && spriteCoords.x <= 1 && spriteCoords.y >= 0 && spriteCoords.y <= 1) {
+				float2 uvCoords = uvs.xy + spriteCoords * (uvs.zw - uvs.xy);
+				float4 sample = tex2D(sampleTex, uvCoords * texSize);
+				if(sample.a == 1){
+					sample = float4(lerp(sample.rgb, fogColor, rayDist/viewDist), 1);
+				}else if(sample.a > 0){
+					sample = float4(lerp(sample.rgb, fogColor, abs(rayDist/viewDist))*sample.a, 1);
+				}
+				return (INPUT.vTexcoord.y > 0.5 && sample.a > 0) ? depthToPixel(rayDist) : sample;
+			}
+		}
+		return float4(0.0, 0.0, 0.0, 0.0);
+	}
+";
+
 // batch shader for "walls" (upright plane sections)
 global.sh_frag_batch = "
 	
@@ -159,9 +205,9 @@ global.sh_frag_batch = "
 	const static float3 defaultXAxis = float3(1.0, 0.0, 0.0);
 	const static float3 defaultYAxis = float3(0.0, 0.0, -1.0);
 	
-	uniform int BATCH_SIZE : register(ps, c[7]);
+	const static int BATCH_SIZE = $MAX_BATCH_SIZE;
 	
-	uniform TexPlane planes[$MAX_BATCH_SIZE] : register(ps, c[8]);
+	uniform TexPlane planes[BATCH_SIZE] : register(ps, c[7]);
 	
 	float4 main(PixelShaderInput INPUT) : SV_TARGET {
 		float actualY = frac(2 * INPUT.vTexcoord.y);
@@ -204,6 +250,7 @@ trace("Type /globalset to set global variables, and /localset to set player vari
 #define compile_shaders
 	global.sh_comp = shader_create(global.sh_vertex, string_replace_all(global.sh_frag, "$INCLUDES", global.sh_includes));
 	global.sh_comp_batch = shader_create(global.sh_vertex, string_replace_all(string_replace_all(global.sh_frag_batch, "$INCLUDES", global.sh_includes), "$MAX_BATCH_SIZE", string(global.batch_size)));
+	global.sh_comp_general = shader_create(global.sh_vertex, string_replace_all(global.sh_frag_general, "$INCLUDES", global.sh_includes));
 
 // PLANE API
 //setup -> draw -> raycast
@@ -235,7 +282,7 @@ trace("Type /globalset to set global variables, and /localset to set player vari
 // init -> add -> finalize
 #define batch_init(tex)
 	global.batch_now = 0;
-	global.uniform_index = UNIFORMSTART+1;
+	global.uniform_index = UNIFORMSTART;
 	texture_set_stage(1, tex);
 	shader_set_fragment_constant_f(6, [texture_get_width(tex), texture_get_height(tex)]);
 
@@ -257,9 +304,7 @@ trace("Type /globalset to set global variables, and /localset to set player vari
 	if global.batch_now == global.batch_size batch_raycast()
 	
 #define batch_raycast
-	//trace("RAYCASTING", global.batch_now)
 	texture_set_stage(2, surface_get_texture(global.viewsurf));
-	shader_set_fragment_constant_i(UNIFORMSTART, [global.batch_now]);
 	shader_set(global.sh_comp_batch);
 	surface_set_target(global.viewsurf);
 	draw_surface(global.drawsurf, 0, 0);
@@ -267,10 +312,41 @@ trace("Type /globalset to set global variables, and /localset to set player vari
 	shader_reset();
 	
 	global.batch_now = 0;
-	global.uniform_index = UNIFORMSTART+1;
+	global.uniform_index = UNIFORMSTART;
 	
 #define batch_finalize
-	if global.batch_now > 0 batch_raycast()
+	if global.batch_now > 0 {
+		for(var i = 0; i < global.batch_size - global.batch_now; i++) {
+			// we need to nullify the remainder of the batch
+			// can't use dynamic loops
+			shader_set_fragment_constant_f(global.uniform_index++, [0,0,1,1]);
+			shader_set_fragment_constant_f(global.uniform_index++, [0,0,0,0]); // no size = no rendering
+			shader_set_fragment_constant_f(global.uniform_index++, [0,0,0,0]);
+		}
+		batch_raycast()
+	}
+
+// no batch(for bosses and other stuff)
+#define raycast_sprite(sprite, subimage, _x, _y, _z, _rot)
+	var tex = sprite_get_texture(sprite, subimage)
+	var tex_size = [texture_get_width(tex), texture_get_height(tex)]
+	var uvs = sprite_get_uvs(sprite, subimage)
+	var spr_size = [sprite_get_width(sprite), sprite_get_height(sprite)]
+	var spr_offset = [sprite_get_xoffset(sprite), sprite_get_yoffset(sprite)]
+	
+	texture_set_stage(1, tex)
+	texture_set_stage(2, surface_get_texture(global.viewsurf))
+	
+	shader_set_fragment_constant_f(6, tex_size)	
+	shader_set_fragment_constant_f(7, [uvs[0], uvs[1], uvs[2], uvs[3]]);
+	shader_set_fragment_constant_f(8, [spr_offset[0] - uvs[4], spr_offset[1] - uvs[5], spr_size[0] * uvs[6], spr_size[1] * uvs[7]]);
+	shader_set_fragment_constant_f(9, [_x, _y, _z, degtorad(_rot)]);
+	
+	shader_set(global.sh_comp_general);
+	surface_set_target(global.viewsurf);
+	draw_surface(global.drawsurf, 0, 0);
+	surface_reset_target();
+	shader_reset();
 	
 #define chat_command
 if(argument0 == "globalset") {
@@ -470,7 +546,7 @@ if(argument0 == "localset") {
                 if(player_find(index) == id && index == global.camera){
                     global.camera = index;
                     global.camera_x = x;
-                    global.camera_y = y - 1;
+                    global.camera_y = y;
                     global.camera_angle = gunangle;
     				if(vertical){
     					global.camera_angle_v+=yTurn;
@@ -595,45 +671,82 @@ if(argument0 == "localset") {
         }
 
         if(instance_exists(BackCont)){
-            var w = instances_matching(Wall, "shadows_3D", null);
-            if(array_length(w) > 0){
+            /*if(instance_exists(GenCont)){
                 surface_set_target(_surf);
                 draw_clear_alpha(0, 0);
+                surface_reset_target();
+            }*/
 
-                d3d_set_fog(1, BackCont.shadcol, 0, 0);
+            var _sx = 8,
+                _sy = 8;
+
+             // Draw Wall Surface:
+            if(array_length(instances_matching(Wall, "shadows_3D", null)) + array_length(instances_matching(FloorExplo, "shadows_3D", null)) > 0 || !surface_exists(global.surfWallShadow)){
+                if(!surface_exists(global.surfWallShadow)){
+                    global.surfWallShadow = surface_create(_surfW, _surfH);
+                }
+
+                surface_set_target(global.surfWallShadow);
+                draw_clear_alpha(0, 0);
+
+                with(FloorExplo) shadows_3D = true;
                 with(Wall){
                     shadows_3D = true;
 
                     var _x = x - _surfX,
-                        _y = y - _surfY,
-                        _ox = 16,
-                        _oy = 16;
+                        _y = y - _surfY;
         
                     draw_primitive_begin(pr_trianglestrip);
                     draw_vertex(_x, _y);
                     draw_vertex(_x + 16, _y + 16);
-                    draw_vertex(_x - 1 + _ox, _y - 1 - _oy);
-                    draw_vertex(_x + 17 + _ox, _y + 17 - _oy);
+                    draw_vertex(_x - 1 + _sx, _y - 1 - _sy);
+                    draw_vertex(_x + 17 + _sx, _y + 17 - _sy);
                     draw_primitive_end();
-                    draw_sprite(outspr, image_index, _x - sprite_get_xoffset(outspr) + 4 + _ox, _y + sprite_get_yoffset(outspr) - 4 - _oy);
+                    draw_sprite(outspr, image_index, _x - sprite_get_xoffset(outspr) + 4 + _sx, _y + sprite_get_yoffset(outspr) - 4 - _sy);
+                    draw_sprite_ext(outspr, image_index, _x + 19, _y + 6, 1.1, 1.1, 180, c_white, 1);
                 }
-                /*with(Player){
-                    var _x = x - _surfX,
-                        _y = y - _surfY - 12,
-                        _ox = sprite_xoffset,
-                        _oy = sprite_yoffset,
-                        w = sprite_width,
-                        h = sprite_height;
-
-                    draw_sprite_pos(sprite_index, image_index, _x - _ox, _y - _oy, _x + (w - _ox), _y - _oy, _x + (w - _ox), _y + (h - _oy), _x - _ox, _y + (h - _oy), 1);
-                }*/
-                d3d_set_fog(0, 0, 0, 0);
-
-                surface_reset_target();
-    	        surface_set_target(global.planesurf);
             }
 
-            draw_surface_ext(_surf, _surfX - floor(global.camera_x - global.view_dist), _surfY - floor(global.camera_y - global.view_dist), 1, 1, 0, c_white, BackCont.shadalpha);
+             // Draw Shadows:
+            surface_set_target(_surf);
+            draw_clear_alpha(0, 0);
+            d3d_set_fog(1, c_white, 0, 0);
+
+                 // Walls:
+                draw_surface(global.surfWallShadow, 0, 0);
+
+                var a = global.camera_angle - 90;
+                with(hitme){
+                     // Cool Shadows:
+                    if(true){
+                        var _ox = sprite_xoffset,
+                            _oy = sprite_yoffset,
+                            w = sprite_width,
+                            h = sprite_height,
+                            _x = x - _surfX,
+                            _y = y - _surfY - _oy,
+                            _x1 = _x - lengthdir_x(_ox, a) + _sx,
+                            _y1 = _y - lengthdir_y(_ox, a) - sprite_yoffset - _sy/2,
+                            _x2 = _x1 + lengthdir_x(w, a),
+                            _y2 = _y1 + lengthdir_y(w, a),
+                            _x3 = _x + lengthdir_x(w - _ox, a),
+                            _y3 = _y + lengthdir_y(w - _ox, a) + (sprite_height - sprite_yoffset),
+                            _x4 = _x3 - lengthdir_x(w, a),
+                            _y4 = _y3 - lengthdir_y(w, a);
+        
+                        draw_sprite_pos(sprite_index, image_index, _x1, _y1, _x2, _y2, _x3, _y3, _x4, _y4, 1);
+                    }
+
+                     // Classic Shadows:
+                    else{
+                        var o = (sprite_height / 3);
+                        draw_sprite_ext(spr_shadow, image_index, x - _surfX - lengthdir_x(o, a - 90), y - _surfY - lengthdir_y(o, a - 90), 1, 1, a, c_white, 1);
+                    }
+                }
+            
+            d3d_set_fog(0, 0, 0, 0);
+    	    surface_set_target(global.planesurf);
+            draw_surface_ext(_surf, _surfX - floor(global.camera_x - global.view_dist), _surfY - floor(global.camera_y - global.view_dist), 1, 1, 0, BackCont.shadcol, BackCont.shadalpha);
         }
 
     plane_raycast(0);
@@ -667,7 +780,7 @@ if(argument0 == "localset") {
 	plane_setup();
 	
     	// Other Stuff:
-    	with instances_viewbounds(40, [Tangle, RogueStrike, Portal]) {
+    	with instances_viewbounds(40, [Tangle, RogueStrike]) {
     		plane_draw(sprite_index, image_index, x, y, image_xscale, image_yscale, image_angle);
     	}
 	
@@ -698,7 +811,7 @@ if(argument0 == "localset") {
         var _z = (image_index / (image_number - 1)) * (speed + 1) * ((sprite_height / 4) + 1);
 		batch_add(sprite_index, image_index, x, y, _z, -global.camera_angle+90, false, 1);
 	}
-
+	
 	with instances_viewbounds(40, [hitme, Revive]) {
 		if(object_index != Player || !player_is_local_nonsync(index)){
 		    batch_add(sprite_index, image_index, x, y, sprite_height/3, -global.camera_angle+90, false, 1);
@@ -783,7 +896,13 @@ if(argument0 == "localset") {
 	with instances_viewbounds(40, [Explosion, MeatExplosion, PlasmaImpact]) {
 		batch_add(sprite_index, image_index, x, y, (sprite_height / 4) + ((sprite_height / 16) * (image_index * abs(1.5 * sin(x + y)))), -global.camera_angle+90, false, 1);
 	}
-	
+
+	with instances_viewbounds(40, Portal) {
+		batch_add(sprite_index, image_index, x+5, y, (sprite_height / 2), -global.camera_angle+90, false, 1);
+		batch_add(sprite_index, image_index, x-5, y, (sprite_height / 2), -global.camera_angle+90, false, 1);
+		batch_add(sprite_index, image_index, x, y+5, (sprite_height / 2), -global.camera_angle+90, false, 1);
+		batch_add(sprite_index, image_index, x, y-5, (sprite_height / 2), -global.camera_angle+90, false, 1);
+	}
 	with instances_viewbounds(40, PopoShield) {
         var _ang = point_direction(x, y, global.camera_x, global.camera_y);
         batch_add(sprite_index, image_index, x + lengthdir_x(12, _ang), y + lengthdir_y(12, _ang), 8, -_ang + 90, false, global.popo_shield_height);
@@ -791,18 +910,14 @@ if(argument0 == "localset") {
 	
 	batch_finalize();
 
-	batch_init(sprite_get_texture(sprFishMenuSelected, 0));
-
 	with instances_viewbounds(40, CampChar) {
-		if(num < 17) batch_add(sprite_index, image_index, x, y, 12, -global.camera_angle+90, false, 1);
+		if(num < 17) raycast_sprite(sprite_index, image_index, x, y, 12, -global.camera_angle+90);
 	}
-	
-	batch_finalize();
 	
 	draw_set_projection(0);
 	draw_surface_ext(global.viewsurf, 0, 0, game_width / global.display_res[0], game_height / global.display_res[1], 0, c_white, 1);
 	// small depth image
-	//draw_surface_part_ext(global.viewsurf, 0, global.display_res[1], global.display_res[0], global.display_res[1], 0, 50, game_width * 0.2 / global.display_res[0], game_height * 0.2 / global.display_res[1], c_white, 1);
+	draw_surface_part_ext(global.viewsurf, 0, global.display_res[1], global.display_res[0], global.display_res[1], 0, 50, game_width * 0.2 / global.display_res[0], game_height * 0.2 / global.display_res[1], c_white, 1);
 
 	with(player_find(global.camera)){
 		if(crosshair > 0){draw_sprite(sprCrosshair, crosshair - 1, game_width / 2, game_height / 2);}
