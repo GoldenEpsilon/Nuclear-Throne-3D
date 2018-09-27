@@ -812,12 +812,12 @@ if(argument0 == "localset") {
     		}
 	    }
 
-	plane_raycast(global.camera_height / 2);
+	plane_raycast(global.camera_height / 2 + _camZ);
 	
 	plane_setup();
 	
     	// Other Stuff:
-    	with instances_viewbounds(40, [Tangle, RogueStrike]) {
+    	with instances_viewbounds(40, [Tangle, RogueStrike, Portal]) {
     		plane_draw(sprite_index, image_index, x, y, image_xscale, image_yscale, image_angle);
     	}
 	
