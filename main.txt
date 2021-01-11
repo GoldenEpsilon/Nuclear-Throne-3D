@@ -1,0 +1,5 @@
+/loadmod NT3D
+/loadmod options
+/loadmod JSONModels
+/loadmod NT3DAllow
+/loadtext main2.txt
